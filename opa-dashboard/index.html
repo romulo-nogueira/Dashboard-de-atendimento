@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard de Atendimentos</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231F6FEB'/%3E%3Cpath d='M7 22V14M13 22V9M19 22v-6M25 22V11' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-row">
+    <div class="brand">
+      <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M5 19v-6M11 19V5M17 19v-9M22 19V9" transform="translate(-1 0)"/></svg></div>
+      <div><h1 id="title">Dashboard de Atendimentos</h1><p id="subtitle"></p></div>
+    </div>
+    <div class="chips"><span class="chip" id="chipPeriod">…</span><span class="chip" id="chipSource">…</span></div>
+  </div>
+  <nav class="tabs" aria-label="Seções">
+    <a href="#dashboard">Painel</a>
+    <a href="#avaliacoes">Avaliações</a>
+    <a href="#motivos">Motivos</a>
+    <a href="#dados">Atualizar dados</a>
+    <a href="#config">Configurações</a>
+  </nav>
+</header>
+
+<div class="toolbar no-print" id="toolbar">
+  <label for="selPeriodo">Período</label>
+  <select id="selPeriodo"></select>
+  <span id="customDates" hidden class="row">
+    <label for="dtIni">de</label><input type="date" id="dtIni">
+    <label for="dtFim">até</label><input type="date" id="dtFim">
+  </span>
+  <span class="sp"></span>
+  <button class="btn" id="btnPrint" type="button">Imprimir / salvar PDF</button>
+</div>
+<div class="notes" id="notes"></div>
+
+<main>
+  <section class="view" id="view-dashboard"><div class="loading">Carregando dados…</div></section>
+  <section class="view" id="view-avaliacoes" hidden></section>
+  <section class="view" id="view-motivos" hidden></section>
+  <section class="view" id="view-dados" hidden></section>
+  <section class="view" id="view-config" hidden></section>
+</main>
+<div id="toast" hidden role="status"></div>
+
+<script src="js/config.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/parser.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

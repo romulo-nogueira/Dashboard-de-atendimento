@@ -1,0 +1,21 @@
+# Apache / hospedagem compartilhada (cPanel etc.)
+Options -Indexes
+DirectoryIndex index.html
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Robots-Tag "noindex, nofollow"
+  <FilesMatch "\.(csv)$">
+    Header set Cache-Control "no-store"
+  </FilesMatch>
+  <FilesMatch "\.(css|js)$">
+    Header set Cache-Control "public, max-age=300"
+  </FilesMatch>
+</IfModule>
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/css application/javascript text/csv
+</IfModule>
+# Senha (opcional): crie o .htpasswd com  htpasswd -c .htpasswd usuario  e descomente:
+# AuthType Basic
+# AuthName "Dashboard de Atendimentos"
+# AuthUserFile /caminho/completo/.htpasswd
+# Require valid-user

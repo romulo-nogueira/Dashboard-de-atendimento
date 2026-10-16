@@ -30,14 +30,43 @@
     encerradoEm: ['encerrado em'],
     avaliacao: ['avaliacao', 'avaliacao do cliente', 'nota'],
     tempoAtendimento: ['tempo em atendimento'],
-    tempoEspera: ['tempo em espera']
+    tempoEspera: ['tempo em espera'],
+    // colunas guardadas para análises futuras (não entram nos cálculos atuais)
+    etiquetas: ['etiquetas do atendimento', 'etiquetas'],
+    abertoPor: ['aberto por'],
+    encerradoPor: ['encerrado por'],
+    mensagensEnviadas: ['mensagens enviadas'],
+    mensagensRecebidas: ['mensagens recebidas'],
+    aiEvaluation: ['aievaluation', 'ai evaluation'],
+    waitingTimeInLastDepartment: ['waitingtimeinlastdepartment', 'waiting time in last department'],
+    // identificação interna do cliente e localização (para reincidência e análise por região)
+    idCliente: ['id do cliente', 'id cliente', 'codigo do cliente', 'cod cliente', 'codigo cliente'],
+    bairro: ['bairro', 'bairro do cliente'],
+    condominio: ['condominio', 'condominio do cliente'],
+    cidade: ['cidade', 'cidade do cliente', 'municipio'],
+    regiao: ['regiao', 'regiao do cliente', 'localidade']
   };
+  const GEO_FIELDS = ['bairro', 'condominio', 'cidade', 'regiao'];
+  const GEO_HINTS = [['bairro', 'bairro'], ['condominio', 'condominio'], ['cidade', 'cidade']];
   // Cabeçalhos usados ao exportar (iguais aos do sistema de origem)
   const EXPORT_HEADERS = {
     id: 'id', protocolo: 'Protocolo', status: 'Status', canal: 'Canal', atendente: 'Último atendente',
     departamento: 'Último departamento', motivos: 'Motivos do atendimento', abertoEm: 'Aberto em',
     assumidoEm: 'Assumido em', encerradoEm: 'Encerrado em', avaliacao: 'Avaliação',
-    tempoAtendimento: 'Tempo em atendimento', tempoEspera: 'Tempo em espera'
+    tempoAtendimento: 'Tempo em atendimento', tempoEspera: 'Tempo em espera',
+    etiquetas: 'Etiquetas do atendimento', abertoPor: 'Aberto por', encerradoPor: 'Encerrado por',
+    mensagensEnviadas: 'Mensagens enviadas', mensagensRecebidas: 'Mensagens recebidas',
+    aiEvaluation: 'aiEvaluation', waitingTimeInLastDepartment: 'waitingTimeInLastDepartment',
+    idCliente: 'Id do Cliente', bairro: 'Bairro', condominio: 'Condomínio', cidade: 'Cidade', regiao: 'Região'
+  };
+
+  // Dados que identificam o cliente: NUNCA são guardados (nem no navegador, nem no banco).
+  // Vale para colunas que não são reconhecidas pelo painel; as demais colunas são mantidas em "extras".
+  let sensitiveTerms = ['contato', 'cliente', 'telefone', 'celular', 'fone', 'cpf', 'cnpj', 'email', 'e mail', 'endereco', 'documento', 'nome', 'cep', 'whatsapp', 'rg'];
+  const addSensitive = terms => { (terms || []).forEach(t => { const k = normKey(t); if (k && !sensitiveTerms.includes(k)) sensitiveTerms.push(k); }); };
+  const isSensitiveHeader = h => {
+    const k = ' ' + normKey(h) + ' ';
+    return sensitiveTerms.some(t => k.includes(' ' + t + ' '));
   };
   const FIELDS = Object.keys(EXPORT_HEADERS);
 
@@ -131,7 +160,12 @@
       const m = {}; let hits = 0;
       (table[i] || []).forEach((h, ci) => {
         const k = normKey(h == null ? '' : h);
-        for (const f in ALIASES) if (m[f] === undefined && ALIASES[f].includes(k)) { m[f] = ci; hits++; break; }
+        let hit = false;
+        for (const f in ALIASES) if (m[f] === undefined && ALIASES[f].includes(k)) { m[f] = ci; hits++; hit = true; break; }
+        if (!hit) {
+          const w = ' ' + k + ' ';
+          for (const [f, word] of GEO_HINTS) if (m[f] === undefined && w.includes(' ' + word + ' ')) { m[f] = ci; hits++; break; }
+        }
       });
       if (hits >= 3 && m.canal !== undefined) { hi = i; map = m; break; }
     }
@@ -143,6 +177,14 @@
     if (map.tempoAtendimento === undefined) warnings.push('Coluna "Tempo em atendimento" ausente: o TMA ficará vazio.');
     if (map.atendente === undefined) warnings.push('Coluna "Último atendente" ausente: o ranking por atendente ficará vazio.');
     if (map.motivos === undefined) warnings.push('Coluna "Motivos do atendimento" ausente: a aba Motivos ficará vazia.');
+    // colunas não reconhecidas: ficam em "extras", exceto as que parecem dados do cliente
+    const used = new Set(Object.values(map));
+    const extraCols = [], descartadas = [];
+    (table[hi] || []).forEach((h, ci) => {
+      const name = h == null ? '' : String(h).trim();
+      if (!name || used.has(ci)) return;
+      if (isSensitiveHeader(name)) descartadas.push(name); else extraCols.push({ name, ci });
+    });
     const rows = [];
     for (let i = hi + 1; i < table.length; i++) {
       const line = table[i];
@@ -163,9 +205,44 @@
         o[f] = v;
         if (v) any = true;
       }
+      const ex = {};
+      for (const c of extraCols) {
+        let v = line[c.ci];
+        v = v == null ? '' : (v instanceof Date ? fmtISO(parseDate(v)) : String(v).trim());
+        if (v && v !== '-') ex[c.name] = v;
+      }
+      if (Object.keys(ex).length) o.extras = ex;
       if (any) rows.push(o);
     }
-    return { rows, warnings };
+    const hdr = table[hi] || [];
+    const localizacao = ['idCliente', ...GEO_FIELDS].filter(f => map[f] !== undefined).map(f => String(hdr[map[f]]).trim());
+    return { rows, warnings, descartadas, extrasCols: extraCols.map(c => c.name), localizacao };
+  }
+
+  /* ---------- cadastro de clientes (Id -> bairro / condomínio ...) ---------- */
+  const CLI_FIELDS = ['idCliente', ...GEO_FIELDS];
+  // Só lê o Id e a localização. Qualquer outra coluna (nome, telefone, endereço...) é descartada.
+  function canonicalizeClientes(table) {
+    for (let i = 0; i < Math.min(table.length, 10); i++) {
+      const m = {};
+      (table[i] || []).forEach((h, ci) => {
+        const k = normKey(h == null ? '' : h), w = ' ' + k + ' ';
+        for (const f of CLI_FIELDS) if (m[f] === undefined && ALIASES[f].includes(k)) { m[f] = ci; return; }
+        for (const [f, word] of GEO_HINTS) if (m[f] === undefined && w.includes(' ' + word + ' ')) { m[f] = ci; return; }
+      });
+      if (m.idCliente === undefined || !GEO_FIELDS.some(f => m[f] !== undefined)) continue;
+      const used = new Set(Object.values(m));
+      const descartadas = (table[i] || []).map(h => (h == null ? '' : String(h).trim())).filter((h, ci) => h && !used.has(ci));
+      const rows = [];
+      for (let r = i + 1; r < table.length; r++) {
+        const line = table[r]; if (!line || !line.length) continue;
+        const o = {};
+        for (const f of CLI_FIELDS) { const v = m[f] === undefined ? '' : line[m[f]]; o[f] = v == null ? '' : String(v).trim(); if (o[f] === '-') o[f] = ''; }
+        if (o.idCliente && GEO_FIELDS.some(f => o[f])) rows.push(o);
+      }
+      return { rows, descartadas, colunas: CLI_FIELDS.filter(f => m[f] !== undefined).map(f => EXPORT_HEADERS[f]) };
+    }
+    return { rows: [], error: 'Não encontrei as colunas do cadastro. O arquivo precisa ter "Id do Cliente" e pelo menos uma entre Bairro, Condomínio, Cidade ou Região.' };
   }
 
   /* ---------- registros preparados ---------- */
@@ -287,6 +364,9 @@
     const minAval = opts.minAvaliacoes != null ? opts.minAvaliacoes : 10;
     const maxDia = opts.maxDia || 31;
     const baseCanais = opts.canais || ['WhatsApp', 'Instagram', 'Telefonia'];
+    // Teto de duração (min) para o TMA: atendimentos acima dele ficam fora da média (0 = sem teto)
+    const tmaMax = opts.tmaMaxMin > 0 ? opts.tmaMaxMin : 0;
+    const okTma = r => r.tma != null && (!tmaMax || r.tma <= tmaMax);
 
     const cnt = {};
     recs.forEach(r => cnt[r.canal] = (cnt[r.canal] || 0) + 1);
@@ -297,7 +377,13 @@
     const M = { total: recs.length, canais };
     M.canal = canais.map(c => ({ canal: c, total: cnt[c] || 0, pct: recs.length ? (cnt[c] || 0) / recs.length : 0 }));
 
-    const tmas = recs.filter(r => r.tma != null).map(r => r.tma);
+    const tmas = recs.filter(okTma).map(r => r.tma);
+    const median = a => { if (!a.length) return 0; const b = a.slice().sort((x, y) => x - y), m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; };
+    // TMA ponderado: TMA de cada canal x atendimentos do canal / total de atendimentos com tempo válido
+    M.tmaCanal = canais.map(c => { const a = recs.filter(r => r.canal === c && okTma(r)).map(r => r.tma); return { canal: c, n: a.length, tma: a.length ? avg(a) : 0, mediana: median(a) }; });
+    const nTma = M.tmaCanal.reduce((a, x) => a + x.n, 0);
+    const tmaPond = nTma ? M.tmaCanal.reduce((a, x) => a + x.tma * x.n, 0) / nTma : 0;
+    const tmaExcl = recs.filter(r => r.tma != null && !okTma(r)).length;
     const notas = recs.filter(r => r.nota != null).map(r => r.nota);
 
     function groupVol(keys, keyFn, fin) {
@@ -305,7 +391,7 @@
       for (const r of recs) {
         const o = g.get(keyFn(r)); if (!o) continue;
         o.total++; o.porCanal[r.canal]++;
-        if (r.tma != null) o.tmas.push(r.tma);
+        if (okTma(r)) o.tmas.push(r.tma);
         if (r.nota != null) o.notas.push(r.nota);
       }
       return keys.map(k => fin(g.get(k)));
@@ -335,7 +421,7 @@
         if (!o) { o = { nome: r.atendente, total: 0, porCanal: zeroCanais(), tmas: [], notas: [] }; at.set(k, o); }
       }
       o.total++; o.porCanal[r.canal]++;
-      if (r.tma != null) o.tmas.push(r.tma);
+      if (okTma(r)) o.tmas.push(r.tma);
       if (r.nota != null) o.notas.push(r.nota);
     }
     const fin = o => {
@@ -389,7 +475,7 @@
     const iFreq = firstMax(dist, d => d.qtd);
     M.kpi = {
       total: recs.length,
-      tma: tmas.length ? r1(avg(tmas)) : 0,
+      tma: r1(tmaPond), tmaMediana: median(tmas), tmaN: nTma, tmaExcluidos: tmaExcl, tmaMaxMin: tmaMax,
       nota: notaGeral, nAval: notas.length,
       taxaResp: recs.length ? notas.length / recs.length : 0,
       csat: notas.length ? satisf / notas.length : 0,
@@ -410,7 +496,7 @@
   }
 
   return {
-    TURNOS, MESES, NOTAS, FIELDS, EXPORT_HEADERS, ALIASES,
+    TURNOS, MESES, NOTAS, FIELDS, EXPORT_HEADERS, ALIASES, GEO_FIELDS, CLI_FIELDS, addSensitive, isSensitiveHeader, canonicalizeClientes,
     normKey, parseDate, parseDuration, parseNota, splitMotivos, properCase, motivoKey,
     fmtISO, fmtDate, fmtISODay, parseISODay,
     canonicalize, prepare, buildDepara, applyDepara,

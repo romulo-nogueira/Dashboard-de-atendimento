@@ -4,7 +4,7 @@
   const E = window.OPAEngine, P = window.OPAParser, C = window.Charts;
   const CFG = Object.assign({
     titulo: 'Dashboard de Atendimentos', subtitulo: '', dataUrl: 'data/atendimentos.csv', deParaUrl: 'data/depara_motivos.csv',
-    autoRefreshMinutes: 0, minAvaliacoesRanking: 10, canais: ['WhatsApp', 'Instagram', 'Telefonia'], permitirAtualizacaoPeloNavegador: true
+    apiUrl: '', autoRefreshMinutes: 0, minAvaliacoesRanking: 10, tmaMaxHoras: 24, canais: ['WhatsApp', 'Instagram', 'Telefonia'], permitirAtualizacaoPeloNavegador: true
   }, window.OPA_CONFIG || {});
 
   const $ = s => document.querySelector(s);
@@ -44,9 +44,12 @@
     depara: new Map(), deparaList: [], deparaCustom: false, unmapped: [],
     source: { kind: 'none' }, loadError: '',
     period: { mode: 'auto', start: '', end: '' },
-    settings: Object.assign({ minAval: CFG.minAvaliacoesRanking }, ls.get('opa.settings', {})),
-    pending: null, view: 'dashboard', motSeg: 'mes', motQ: '', depQ: ''
+    settings: Object.assign({ minAval: CFG.minAvaliacoesRanking, tmaMaxH: CFG.tmaMaxHoras }, ls.get('opa.settings', {})),
+    pending: null, view: 'dashboard', motSeg: 'mes', motQ: '', depQ: '',
+    api: { on: false }, apiError: '', dirty: false, cfgVersion: 0, admin: ''
   };
+  try { S.admin = sessionStorage.getItem('opa.admin') || ''; } catch (e) { /* ignore */ }
+  const rememberAdmin = pw => { S.admin = pw; try { sessionStorage.setItem('opa.admin', pw); } catch (e) { /* ignore */ } };
 
   /* ---------- utilitários ---------- */
   let toastT;
@@ -81,6 +84,39 @@
     } catch (e) { S.deparaList = []; }
   }
 
+  /* ---------- API / banco de dados ---------- */
+  const api = {
+    async call(method, path, body, pw) {
+      const h = {};
+      if (body !== undefined) h['Content-Type'] = 'application/json';
+      if (pw) h['X-Admin-Password'] = pw;
+      const r = await fetch(CFG.apiUrl.replace(/\/$/, '') + path, { method, headers: h, cache: method === 'GET' ? 'no-cache' : 'no-store', body: body === undefined ? undefined : JSON.stringify(body) });
+      let data = null;
+      try { data = await r.json(); } catch (e) { /* resposta sem JSON */ }
+      if (!r.ok || data === null) { const err = new Error((data && data.erro) || ('HTTP ' + r.status)); err.status = r.status; throw err; }
+      return data;
+    }
+  };
+
+  async function loadFromApi(silent) {
+    const [cfg, d] = await Promise.all([api.call('GET', '/config'), api.call('GET', '/dados')]);
+    S.api.on = true; S.apiError = '';
+    S.settings = Object.assign({ minAval: CFG.minAvaliacoesRanking, tmaMaxH: CFG.tmaMaxHoras }, cfg.settings || {});
+    S.deparaList = cfg.depara || []; S.deparaCustom = false; S.dirty = false; S.cfgVersion = cfg.version;
+    const rows = d.rows.map(a => {
+      const o = {};
+      d.fields.forEach((f, i) => {
+        if (f === 'extras') { if (a[i]) { try { o.extras = JSON.parse(a[i]); } catch (e) { /* ignora */ } } }
+        else o[f] = a[i] == null ? '' : a[i];
+      });
+      return o;
+    });
+    S.source = { kind: 'api', updatedAt: d.updatedAt, version: d.version, when: Date.now() };
+    S.loadError = '';
+    setRows(rows);
+    if (!silent) toast('Dados recarregados do banco.');
+  }
+
   async function loadServerRows() {
     const { buf, modified } = await fetchBuffer(CFG.dataUrl);
     const { table, kind } = await P.tableFromFile(bufFile(CFG.dataUrl, buf));
@@ -90,6 +126,10 @@
   }
 
   async function loadInitial() {
+    if (CFG.apiUrl) {
+      try { await loadFromApi(true); return; }
+      catch (e) { S.apiError = e.message; S.api.on = false; }
+    }
     await loadDepara();
     let local = null;
     try { local = await idb.get('dataset'); } catch (e) { /* sem IndexedDB */ }
@@ -138,7 +178,7 @@
   function recompute() {
     S.per = E.resolvePeriod(S.recs, currentManual());
     S.filtered = E.filterPeriod(S.recs, S.per);
-    S.M = E.compute(S.filtered, { maxDia: S.per.maxDia || 31, minAvaliacoes: Number(S.settings.minAval) || 10, canais: CFG.canais });
+    S.M = E.compute(S.filtered, { maxDia: S.per.maxDia || 31, minAvaliacoes: Number(S.settings.minAval) || 10, tmaMaxMin: (Number(S.settings.tmaMaxH) || 0) * 60, canais: CFG.canais });
     renderChrome();
     renderView();
   }
@@ -149,8 +189,10 @@
     document.title = CFG.titulo + (S.per && !S.per.empty ? ' · ' + S.per.label : '');
     $('#chipPeriod').textContent = S.per.empty ? 'Sem dados' : S.per.label + ' · ' + n0(S.M.total) + ' atendimentos';
     const s = S.source, cs = $('#chipSource');
-    cs.classList.toggle('warn', s.kind === 'local');
-    cs.textContent = s.kind === 'server' ? 'Dados do servidor' + (s.modified ? ' · ' + fmtWhen(new Date(s.modified).getTime()) : '')
+    cs.classList.toggle('warn', s.kind === 'local' || s.kind === 'preview');
+    cs.textContent = s.kind === 'api' ? 'Banco de dados' + (s.updatedAt ? ' · atualizado em ' + fmtWhen(new Date(s.updatedAt).getTime()) : '')
+      : s.kind === 'preview' ? 'Pré-visualização (não publicada)'
+      : s.kind === 'server' ? 'Dados do servidor' + (s.modified ? ' · ' + fmtWhen(new Date(s.modified).getTime()) : '')
       : s.kind === 'local' ? 'Dados deste navegador · ' + fmtWhen(s.when) : 'Sem dados carregados';
 
     // seletor de período
@@ -170,6 +212,7 @@
     // avisos
     const notes = [];
     if (S.loadError) notes.push(['bad', S.loadError]);
+    if (CFG.apiUrl && !S.api.on && S.apiError) notes.push(['', 'Banco de dados indisponível (' + S.apiError + '). Mostrando o arquivo estático ' + CFG.dataUrl + '.']);
     if (S.per.status) S.per.status.forEach(m => { if (!S.loadError) notes.push(['', m]); });
     $('#notes').innerHTML = notes.map(n => `<div class="note ${n[0]}">${esc(n[1])}</div>`).join('');
   }
@@ -203,7 +246,7 @@
     root.innerHTML = `
       <div class="grid g-kpi">
         ${kpi('Total de atendimentos', n0(K.total), `Média de ${n0(K.mediaDia)} por dia com movimento (${K.diasMov} dias)`, 'hero')}
-        ${kpi('TMA médio', n1(K.tma) + '<small>min</small>', K.turnoMaiorTma ? `Maior no turno ${esc(K.turnoMaiorTma.turno)} (${n1(K.turnoMaiorTma.tma)} min)` : '', 'hero')}
+        ${kpi('TMA ponderado', n1(K.tma) + '<small>min</small>', `Mediana ${n1(K.tmaMediana)} min` + (K.tmaExcluidos ? ` · ${n0(K.tmaExcluidos)} acima de ${n0(K.tmaMaxMin / 60)} h fora do cálculo` : ''), 'hero')}
         ${kpi('Nota média', K.nAval ? n2(K.nota) + '<small>/ 5</small>' : '—', `${n0(K.nAval)} avaliações · resposta de ${pct(K.taxaResp)}`, 'hero')}
         ${kpi('Satisfação (nota ≥ 4)', K.nAval ? pct(K.csat) : '—', K.nAval ? `Insatisfeitos (≤ 2): ${pct(K.insat)}` : '', 'hero')}
         ${kpi('Canal líder', K.canalLider ? esc(K.canalLider.canal) : '—', K.canalLider ? pct(K.canalLider.pct) + ' dos atendimentos' : '', 'hero')}
@@ -213,6 +256,9 @@
         ${kpi('Dia menos movimentado', K.diaMenos ? 'Dia ' + K.diaMenos.dia : '—', K.diaMenos ? n0(K.diaMenos.total) + ' atendimentos (parcial)' : '', 'small')}
         ${kpi('Motivo nº 1', K.motivo1 ? esc(K.motivo1.motivo) : '—', K.motivo1 ? n0(K.motivo1.total) + ' ocorrências' : '', 'small')}
         ${kpi('Melhor nota entre atendentes', K.melhorAtendente ? esc(K.melhorAtendente.nome) : '—', K.melhorAtendente ? n2(K.melhorAtendente.nota) + ` (mín. ${S.settings.minAval} avaliações)` : `Nenhum com ${S.settings.minAval}+ avaliações`, 'small')}
+      </div>
+      <div class="grid g-kpi">
+        ${M.tmaCanal.filter(x => x.n).map(x => kpi('TMA · ' + esc(x.canal), n1(x.tma) + '<small>min</small>', `${n0(x.n)} atendimentos · mediana ${n1(x.mediana)} min`, 'small')).join('')}
       </div>
       <div class="grid g-2">
         ${card('Volume e TMA por dia', 'Barras: atendimentos por canal · linha: TMA em minutos (eixo à direita)', 'ch-dia', 'span2')}
@@ -337,7 +383,9 @@
   function renderDados() {
     const root = $('#view-dados'), s = S.source, per = S.per || {};
     const first = per.first != null ? E.fmtDate(per.first) : '—', last = per.last != null ? E.fmtDate(per.last) : '—';
-    const origem = s.kind === 'server' ? `Arquivo do servidor (<code>${esc(s.name)}</code>)${s.modified ? ', modificado em ' + fmtWhen(new Date(s.modified).getTime()) : ''}`
+    const origem = s.kind === 'api' ? `Banco de dados do servidor${s.updatedAt ? ', atualizado em ' + fmtWhen(new Date(s.updatedAt).getTime()) : ''}`
+      : s.kind === 'preview' ? `Pré-visualização de <code>${esc(s.name || '')}</code>: <b>não está publicada</b>, só você vê`
+      : s.kind === 'server' ? `Arquivo do servidor (<code>${esc(s.name)}</code>)${s.modified ? ', modificado em ' + fmtWhen(new Date(s.modified).getTime()) : ''}`
       : s.kind === 'local' ? `Arquivo enviado neste navegador${s.name ? ' (<code>' + esc(s.name) + '</code>)' : ''}, em ${fmtWhen(s.when)}` : 'Nenhum dado carregado';
     const canUp = CFG.permitirAtualizacaoPeloNavegador;
     root.innerHTML = `
@@ -347,12 +395,20 @@
           <dt>Período exibido</dt><dd>${esc(per.label || '—')}</dd></dl>
           <div class="row">
             <button class="btn" id="btnDl" type="button" ${S.rows.length ? '' : 'disabled'}>Baixar CSV tratado</button>
-            <button class="btn" id="btnReload" type="button">Recarregar do servidor</button>
-            ${s.kind === 'local' ? '<button class="btn danger" id="btnLocalOff" type="button">Descartar dados deste navegador</button>' : ''}
+            <button class="btn" id="btnReload" type="button">${S.api.on ? 'Recarregar do banco' : 'Recarregar do servidor'}</button>
+            ${s.kind === 'local' || s.kind === 'preview' ? `<button class="btn danger" id="btnLocalOff" type="button">${s.kind === 'preview' ? 'Descartar pré-visualização' : 'Descartar dados deste navegador'}</button>` : ''}
           </div>
-          <p class="sub" style="margin-top:10px">O CSV tratado não contém nome, telefone nem outros dados pessoais do cliente: só o que o painel usa. É o arquivo certo para publicar no servidor.</p>
+          <p class="sub" style="margin-top:10px">O CSV tratado traz todas as colunas do atendimento, exceto os dados que identificam o cliente (nome, telefone, contato e id do cliente).</p>
         </div>
-        <div class="card"><h2>Atualizar para todos (no servidor)</h2>
+        ${S.api.on ? `<div class="card"><h2>Publicar no banco (para todos)</h2>
+          <p class="sub">Quem abrir o link vê os mesmos dados que você.</p>
+          <ol class="steps">
+            <li>Exporte o relatório de atendimentos no OPA (CSV ou Excel).</li>
+            <li>Envie ou cole o arquivo abaixo e confira a prévia.</li>
+            <li>Informe a senha de administrador e clique em <b>Publicar no banco</b>.</li>
+          </ol>
+          <p class="sub" style="margin-top:8px">Pelo terminal do servidor: <code>node server/importar.js relatorio.xlsx</code> (acrescente <code>--acrescentar</code> para juntar sem duplicar).</p>
+          <div id="cargasBox"></div></div>` : `<div class="card"><h2>Atualizar para todos (no servidor)</h2>
           <p class="sub">Todo mundo que abrir o painel passa a ver o arquivo novo.</p>
           <ol class="steps">
             <li>Exporte o relatório de atendimentos no OPA (CSV ou Excel).</li>
@@ -360,10 +416,10 @@
             <li>Substitua <code>${esc(CFG.dataUrl)}</code> no servidor/repositório por esse CSV.</li>
           </ol>
           <p class="sub" style="margin-top:8px">Se preferir automatizar, o script <code>tools/preparar_dados.py</code> faz os passos 2–3 pela linha de comando, e <code>dataUrl</code> em <code>js/config.js</code> também aceita um link externo.</p>
-        </div>
+        </div>`}
       </div>
       ${canUp ? `<div class="grid g-2">
-        <div class="card"><h2>Enviar arquivo</h2><p class="sub">CSV ou Excel (.xlsx) exportado do OPA. Fica salvo só neste navegador.</p>
+        <div class="card"><h2>Enviar arquivo</h2><p class="sub">CSV ou Excel (.xlsx) exportado do OPA. ${S.api.on ? 'Você confere a prévia antes de publicar.' : 'Fica salvo só neste navegador.'}</p>
           <div class="drop" id="drop" tabindex="0" role="button"><b>Clique para escolher</b> ou arraste o arquivo para cá</div>
           <input type="file" id="file" accept=".csv,.tsv,.txt,.xlsx" hidden>
         </div>
@@ -375,9 +431,18 @@
           <div class="row"><input type="url" id="url" placeholder="https://…" style="flex:1;min-width:240px"><button class="btn" id="btnUrl" type="button">Buscar</button></div>
         </div>
       </div>` : ''}
+      ${S.api.on && canUp ? `<div class="card" style="margin-bottom:14px"><h2>Cadastro de clientes: bairro e condomínio</h2>
+        <p class="sub">O relatório do OPA traz o <b>Id do Cliente</b>, mas não o bairro. Envie um arquivo do seu sistema (provedor/ERP) com as colunas <b>Id do Cliente</b> e <b>Bairro</b> e/ou <b>Condomínio</b> (opcional: Cidade, Região). O painel cruza pelo Id. Nome, telefone e endereço do arquivo são descartados.</p>
+        <div id="cliStatus" class="sub"></div>
+        <div class="row" style="margin-top:8px"><button class="btn" id="btnCli" type="button">Escolher arquivo do cadastro</button><input type="file" id="cliFile" accept=".csv,.tsv,.txt,.xlsx" hidden></div>
+        <div id="cliBox"></div></div>` : ''}
       <div id="pendingBox"></div>`;
     $('#btnDl').onclick = () => download('atendimentos.csv', P.rowsToCSV(S.rows, E.FIELDS, E.EXPORT_HEADERS));
     $('#btnReload').onclick = async () => {
+      if (S.api.on) {
+        try { await loadFromApi(); } catch (e) { toast('Não consegui ler o banco: ' + e.message); }
+        renderChrome(); renderView(); return;
+      }
       if (S.source.kind === 'local' && !confirm('Isso descarta os dados enviados neste navegador e volta a usar o arquivo do servidor. Continuar?')) return;
       try { await idb.del('dataset'); } catch (e) { /* ignore */ }
       await reloadFromServer(); renderChrome(); renderView();
@@ -399,7 +464,64 @@
         catch (e) { showPending({ error: 'Não consegui buscar o link: ' + e.message + '. Se o site não libera acesso externo (CORS), baixe o arquivo e envie-o por aqui.' }); }
       };
     }
+    if (S.api.on) api.call('GET', '/status').then(st => {
+      const cs = $('#cliStatus');
+      if (cs && st.cobertura) {
+        const c = st.cobertura, pc = v => (c.total ? pct(v / c.total) : '0%');
+        cs.innerHTML = `Cadastro: <b>${n0(st.clientes)}</b> clientes · atendimentos com Id do Cliente: <b>${pc(c.comId)}</b> · com bairro: <b>${pc(c.comBairro)}</b> · com condomínio: <b>${pc(c.comCondominio)}</b>`;
+      }
+      const b = $('#cargasBox'); if (!b || !st.cargas.length) return;
+      b.innerHTML = '<p class="sub" style="margin:10px 0 4px"><b>Últimas cargas</b></p><div class="tbl-wrap"><table><thead><tr><th>Quando</th><th class="l">Arquivo</th><th>Modo</th><th>Linhas</th><th>Total</th></tr></thead><tbody>' +
+        st.cargas.slice(0, 5).map(c => `<tr><td>${fmtWhen(new Date(c.em).getTime())}</td><td class="name">${esc(c.arquivo)}</td><td>${esc(c.modo)}</td><td>${n0(c.recebidas)}</td><td>${n0(c.total)}</td></tr>`).join('') + '</tbody></table></div>';
+    }).catch(() => { /* ignore */ });
     renderPending();
+    bindCadastro();
+  }
+
+  /* ---------- cadastro de clientes (Id -> bairro / condomínio) ---------- */
+  function bindCadastro() {
+    const btn = $('#btnCli'); if (!btn) return;
+    const file = $('#cliFile');
+    btn.onclick = () => file.click();
+    file.onchange = async () => {
+      const f = file.files[0]; file.value = ''; if (!f) return;
+      try {
+        const t = await P.tableFromFile(f), res = E.canonicalizeClientes(t.table);
+        S.pendingCli = res.error ? { error: res.error } : { ...res, name: f.name, kind: t.kind };
+      } catch (e) { S.pendingCli = { error: e.message }; }
+      renderCadastro();
+    };
+    renderCadastro();
+  }
+  function renderCadastro() {
+    const box = $('#cliBox'); if (!box) return;
+    const p = S.pendingCli;
+    if (!p) { box.innerHTML = ''; return; }
+    if (p.error) { box.innerHTML = `<div class="note bad">${esc(p.error)}</div>`; return; }
+    const ids = new Set(p.rows.map(r => r.idCliente));
+    const com = f => p.rows.filter(r => r[f]).length;
+    box.innerHTML = `<div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px"><b>Prévia: ${esc(p.name)}</b> <span class="pill mute">${esc(p.kind)}</span>
+      <dl class="kv"><dt>Clientes com localização</dt><dd>${n0(ids.size)}</dd><dt>Com bairro</dt><dd>${n0(com('bairro'))}</dd><dt>Com condomínio</dt><dd>${n0(com('condominio'))}</dd>
+        <dt>Colunas lidas</dt><dd>${esc(p.colunas.join(', '))}</dd></dl>
+      ${p.descartadas.length ? `<div class="note good"><b>Descartadas (não serão gravadas):</b> ${esc(p.descartadas.join(', '))}</div>` : ''}
+      <div class="radio"><label><input type="radio" name="climode" value="acrescentar" checked><span><b>Acrescentar / atualizar</b><br><span class="sub">Mantém os clientes já cadastrados e atualiza os que vierem no arquivo.</span></span></label>
+        <label><input type="radio" name="climode" value="substituir"><span><b>Substituir o cadastro</b><br><span class="sub">Apaga o cadastro atual e usa só este arquivo.</span></span></label></div>
+      <div class="row" style="margin-bottom:8px"><label style="color:var(--muted)">Senha de administrador <input type="password" id="cliPw" autocomplete="current-password" value="${esc(S.admin)}" style="margin-left:6px"></label></div>
+      <div id="cliErr"></div>
+      <div class="row"><button class="btn primary" id="btnCliPub" type="button">Publicar cadastro</button><button class="btn" id="btnCliCancel" type="button">Cancelar</button></div></div>`;
+    $('#btnCliCancel').onclick = () => { S.pendingCli = null; renderCadastro(); };
+    $('#btnCliPub').onclick = async () => {
+      const pw = $('#cliPw').value, err = $('#cliErr'), b = $('#btnCliPub');
+      if (!pw) { err.innerHTML = '<div class="note bad">Informe a senha de administrador.</div>'; return; }
+      b.disabled = true; b.textContent = 'Enviando…'; err.innerHTML = '';
+      try {
+        const r = await api.call('POST', '/clientes', { modo: box.querySelector('input[name=climode]:checked').value, arquivo: p.name, rows: p.rows }, pw);
+        rememberAdmin(pw); S.pendingCli = null;
+        await loadFromApi(true);
+        toast(`Cadastro publicado: ${n0(r.recebidas)} clientes recebidos, ${n0(r.total)} no cadastro.`);
+        renderChrome(); renderView();
+      } catch (e) { b.disabled = false; b.textContent = 'Publicar cadastro'; err.innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+    };
   }
 
   async function handleFile(f) {
@@ -409,7 +531,7 @@
   function stage(t, name) {
     const res = E.canonicalize(t.table);
     if (res.error) return showPending({ error: res.error });
-    showPending({ rows: res.rows, warnings: res.warnings || [], name, kind: t.kind });
+    showPending({ rows: res.rows, warnings: res.warnings || [], descartadas: res.descartadas || [], extrasCols: res.extrasCols || [], localizacao: res.localizacao || [], name, kind: t.kind });
   }
   function showPending(p) { S.pending = p; renderPending(); const b = $('#pendingBox'); if (b) b.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
 
@@ -434,17 +556,26 @@
         <dt>Datas</dt><dd>${min != null ? E.fmtDate(min) + ' a ' + E.fmtDate(max) : '—'}</dd>
         <dt>Canais</dt><dd>${esc(canais.join(', ') || '—')}</dd><dt>Atendentes</dt><dd>${ats.size}</dd><dt>Com avaliação</dt><dd>${n0(comAval)}</dd>
         ${hasKeys ? `<dt>Em relação à base atual</dt><dd>${n0(novas)} novas · ${n0(atual)} já existentes (serão atualizadas)</dd>` : ''}</dl>
+      ${p.descartadas && p.descartadas.length ? `<div class="note good"><b>Dados do cliente descartados (não serão gravados):</b> ${esc(p.descartadas.join(', '))}</div>` : ''}
+      ${p.localizacao && p.localizacao.length ? `<div class="note info">Identificação e localização guardadas: ${esc(p.localizacao.join(', '))}</div>` : ''}
+      ${p.extrasCols && p.extrasCols.length ? `<div class="note info">Colunas novas guardadas para análises futuras: ${esc(p.extrasCols.join(', '))}</div>` : ''}
       ${p.warnings.map(w => `<div class="note">${esc(w)}</div>`).join('')}
       <div class="radio">
         <label><input type="radio" name="mode" value="replace" checked><span><b>Substituir tudo</b><br><span class="sub">A base passa a ser só este arquivo.</span></span></label>
-        <label><input type="radio" name="mode" value="merge" ${hasKeys && S.rows.length ? '' : 'disabled'}><span><b>Acrescentar à base atual</b><br><span class="sub">Junta pelo Protocolo, sem duplicar (a linha nova prevalece).</span></span></label>
+        <label><input type="radio" name="mode" value="merge" ${(S.api.on || hasKeys) && S.rows.length ? '' : 'disabled'}><span><b>Acrescentar à base atual</b><br><span class="sub">Junta pelo Protocolo, sem duplicar (a linha nova prevalece).</span></span></label>
       </div>
-      <div class="row"><button class="btn primary" id="btnApply" type="button" ${p.rows.length ? '' : 'disabled'}>Aplicar</button><button class="btn" id="btnCancel" type="button">Cancelar</button></div></div>`;
+      ${S.api.on ? `<div class="row" style="margin-bottom:8px"><label style="color:var(--muted)">Senha de administrador <input type="password" id="adminPw" autocomplete="current-password" value="${esc(S.admin)}" style="margin-left:6px"></label></div>
+        <div id="pendErr"></div>
+        <div class="row"><button class="btn primary" id="btnPublish" type="button" ${p.rows.length ? '' : 'disabled'}>Publicar no banco (todos veem)</button><button class="btn" id="btnPreview" type="button">Só visualizar aqui</button><button class="btn" id="btnCancel" type="button">Cancelar</button></div>`
+      : `<div class="row"><button class="btn primary" id="btnApply" type="button" ${p.rows.length ? '' : 'disabled'}>Aplicar</button><button class="btn" id="btnCancel" type="button">Cancelar</button></div>`}</div>`;
+    const modeOf = () => box.querySelector('input[name=mode]:checked').value;
     $('#btnCancel').onclick = () => { S.pending = null; renderPending(); };
-    $('#btnApply').onclick = () => applyPending(box.querySelector('input[name=mode]:checked').value);
+    if ($('#btnApply')) $('#btnApply').onclick = () => applyPending(modeOf());
+    if ($('#btnPreview')) $('#btnPreview').onclick = () => applyPending(modeOf(), 'preview');
+    if ($('#btnPublish')) $('#btnPublish').onclick = () => publishPending(modeOf());
   }
 
-  async function applyPending(mode) {
+  async function applyPending(mode, target) {
     const p = S.pending; if (!p || !p.rows) return;
     let rows = p.rows;
     if (mode === 'merge') {
@@ -454,28 +585,56 @@
       rows = [...m.values(), ...extra];
     }
     let saved = true;
-    try { await idb.set('dataset', { rows, savedAt: Date.now(), name: p.name, kind: p.kind }); } catch (e) { saved = false; }
-    S.source = { kind: 'local', name: p.name, when: Date.now() };
+    if (target === 'preview') S.source = { kind: 'preview', name: p.name, when: Date.now() };
+    else {
+      try { await idb.set('dataset', { rows, savedAt: Date.now(), name: p.name, kind: p.kind }); } catch (e) { saved = false; }
+      S.source = { kind: 'local', name: p.name, when: Date.now() };
+    }
     S.loadError = ''; S.pending = null; S.period = { mode: 'auto', start: '', end: '' };
     setRows(rows);
-    toast(saved ? `${n0(rows.length)} linhas carregadas e salvas neste navegador.` : 'Dados carregados, mas o navegador não deixou salvar: valem só até fechar a página.');
+    toast(target === 'preview' ? 'Pré-visualização: só você vê estes dados. Use "Publicar no banco" para valer para todos.' : saved ? `${n0(rows.length)} linhas carregadas e salvas neste navegador.` : 'Dados carregados, mas o navegador não deixou salvar: valem só até fechar a página.');
     location.hash = '#dashboard';
   }
 
+  async function publishPending(mode) {
+    const p = S.pending; if (!p || !p.rows) return;
+    const pw = ($('#adminPw') || {}).value || S.admin, err = $('#pendErr'), btn = $('#btnPublish');
+    if (!pw) { err.innerHTML = '<div class="note bad">Informe a senha de administrador.</div>'; return; }
+    btn.disabled = true; btn.textContent = 'Enviando…'; err.innerHTML = '';
+    try {
+      const r = await api.call('POST', '/dados', { modo: mode === 'merge' ? 'acrescentar' : 'substituir', arquivo: p.name, rows: p.rows }, pw);
+      rememberAdmin(pw);
+      S.pending = null; S.period = { mode: 'auto', start: '', end: '' };
+      await loadFromApi(true);
+      toast(`Publicado: ${n0(r.recebidas)} linhas recebidas, ${n0(r.total)} no banco.` + (r.ignoradas ? ` (${r.ignoradas} ignoradas)` : ''));
+      location.hash = '#dashboard';
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Publicar no banco (todos veem)';
+      err.innerHTML = `<div class="note bad">${esc(e.message)}</div>`;
+    }
+  }
+
   /* ---------- CONFIGURAÇÕES ---------- */
-  function saveDepara() { ls.set('opa.depara', S.deparaList); S.deparaCustom = true; }
+  function saveDepara() { if (S.api.on) { S.dirty = true; return; } ls.set('opa.depara', S.deparaList); S.deparaCustom = true; }
   function renderConfig() {
     const root = $('#view-config');
     const q = E.normKey(S.depQ);
     const list = S.deparaList.map((d, i) => ({ ...d, i })).filter(d => !q || E.normKey(d.key + ' ' + d.padrao).includes(q));
     root.innerHTML = `
       <div class="grid g-2">
-        <div class="card"><h2>Ranking de atendentes</h2><p class="sub">Mínimo de avaliações para um atendente ser classificado como acima ou abaixo da média.</p>
-          <div class="row"><input type="number" id="minAval" min="1" max="500" value="${esc(S.settings.minAval)}" style="width:90px"><button class="btn" id="btnMin" type="button">Salvar</button></div></div>
-        <div class="card"><h2>Sobre esta instalação</h2>
+        <div class="card"><h2>Indicadores</h2>
+          <p class="sub">Mínimo de avaliações para um atendente ser classificado acima ou abaixo da média.</p>
+          <div class="row"><input type="number" id="minAval" min="1" max="500" value="${esc(S.settings.minAval)}" style="width:90px"></div>
+          <p class="sub" style="margin-top:12px">Teto de duração do atendimento no TMA, em horas (0 = sem teto). Acima dele o atendimento não entra na média.</p>
+          <div class="row"><input type="number" id="tmaMax" min="0" max="720" step="1" value="${esc(S.settings.tmaMaxH)}" style="width:90px"><button class="btn" id="btnMin" type="button">Salvar</button></div></div>
+        ${S.api.on ? `<div class="card"><h2>Salvar para todos</h2>
+          <p class="sub">Mínimo de avaliações, teto do TMA e De-Para ficam no banco e valem para todo mundo. O que você muda abaixo só aparece para você até salvar aqui.</p>
+          ${S.dirty ? '<div class="note">Há alterações que ainda não foram salvas no banco.</div>' : '<p class="sub"><b>Tudo salvo.</b> Não há alterações pendentes.</p>'}
+          <div class="row" style="margin-top:8px"><input type="password" id="cfgPw" placeholder="Senha de administrador" autocomplete="current-password" value="${esc(S.admin)}"><button class="btn primary" id="btnSaveCfg" type="button" ${S.dirty ? '' : 'disabled'}>Salvar no banco</button></div>
+          <dl class="kv"><dt>Atualização automática</dt><dd>${CFG.autoRefreshMinutes ? 'a cada ' + CFG.autoRefreshMinutes + ' min' : 'desligada'}</dd></dl></div>` : `<div class="card"><h2>Sobre esta instalação</h2>
           <dl class="kv"><dt>Arquivo de dados</dt><dd><code>${esc(CFG.dataUrl)}</code></dd><dt>De-Para</dt><dd><code>${esc(CFG.deParaUrl)}</code>${S.deparaCustom ? ' <span class="pill warn">editado neste navegador</span>' : ''}</dd>
           <dt>Atualização automática</dt><dd>${CFG.autoRefreshMinutes ? 'a cada ' + CFG.autoRefreshMinutes + ' min' : 'desligada'}</dd></dl>
-          <p class="sub">Estes valores ficam em <code>js/config.js</code>.</p></div>
+          <p class="sub">Estes valores ficam em <code>js/config.js</code>.</p></div>`}
       </div>
       ${S.unmapped.length ? `<div class="card" style="margin-bottom:14px"><h2>Motivos sem padronização (${S.unmapped.length})</h2>
         <p class="sub">Aparecem nos relatórios com o texto original. Defina o nome padrão para agrupá-los.</p>
@@ -486,12 +645,21 @@
           <input type="search" id="depQ" placeholder="Buscar…" value="${esc(S.depQ)}">
           <button class="btn" id="depExp" type="button">Exportar CSV</button><button class="btn" id="depImp" type="button">Importar CSV</button>
           <button class="btn danger" id="depReset" type="button">Restaurar do servidor</button><input type="file" id="depFile" accept=".csv" hidden></div>
-        <p class="sub">Une variações de escrita sob um nome padrão. As alterações valem neste navegador; para valer para todos, use <b>Exportar CSV</b> e substitua <code>${esc(CFG.deParaUrl)}</code> no servidor.</p>
+        <p class="sub">Une variações de escrita sob um nome padrão. ${S.api.on ? 'As alterações valem só para você até clicar em <b>Salvar no banco</b> (card acima).' : `As alterações valem neste navegador; para valer para todos, use <b>Exportar CSV</b> e substitua <code>${esc(CFG.deParaUrl)}</code> no servidor.`}</p>
         <div class="tbl-wrap" style="max-height:520px;overflow:auto"><table><thead><tr><th>Texto original (maiúsculas, sem pontos)</th><th>Nome padrão</th><th></th></tr></thead><tbody>
         ${list.map(d => `<tr><td class="name">${esc(d.key)}</td><td class="l"><input type="text" data-ed="${d.i}" value="${esc(d.padrao)}" style="width:100%;min-width:220px"></td><td><button class="btn danger" data-del="${d.i}" type="button">Remover</button></td></tr>`).join('')}
         <tr><td class="l"><input type="text" id="newKey" placeholder="Novo texto original" style="width:100%"></td><td class="l"><input type="text" id="newVal" placeholder="Nome padrão" style="width:100%"></td><td><button class="btn primary" id="newAdd" type="button">Adicionar</button></td></tr>
         </tbody></table></div></div>`;
-    $('#btnMin').onclick = () => { const v = Math.max(1, parseInt($('#minAval').value, 10) || 10); S.settings.minAval = v; ls.set('opa.settings', S.settings); recompute(); toast('Mínimo de avaliações salvo.'); };
+    $('#btnMin').onclick = () => { const v = Math.max(1, parseInt($('#minAval').value, 10) || 10); S.settings.minAval = v; const t = parseFloat($('#tmaMax').value); S.settings.tmaMaxH = isFinite(t) && t >= 0 ? t : CFG.tmaMaxHoras;
+      if (S.api.on) { S.dirty = true; recompute(); toast('Aplicado só para você. Clique em "Salvar no banco" para valer para todos.'); }
+      else { ls.set('opa.settings', S.settings); recompute(); toast('Configurações salvas.'); } };
+    if (S.api.on) $('#btnSaveCfg').onclick = async () => {
+      const pw = $('#cfgPw').value; if (!pw) return toast('Informe a senha de administrador.');
+      try {
+        const r = await api.call('PUT', '/config', { settings: { minAval: S.settings.minAval, tmaMaxH: S.settings.tmaMaxH }, depara: S.deparaList }, pw);
+        rememberAdmin(pw); S.deparaList = r.depara; S.dirty = false; renderConfig(); toast('Configurações salvas no banco para todos.');
+      } catch (e) { toast(e.message); }
+    };
     root.querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
       const u = S.unmapped[+b.dataset.add], v = root.querySelector(`[data-un="${b.dataset.add}"]`).value.trim();
       if (!v) return; S.deparaList.push({ key: u.key, padrao: v }); saveDepara(); rebuild(); toast('Mapeamento adicionado.');
@@ -515,7 +683,8 @@
       S.deparaList = list; saveDepara(); rebuild(); toast(`${list.length} mapeamentos importados.`);
     };
     $('#depReset').onclick = async () => {
-      if (!confirm('Descartar as edições feitas neste navegador e voltar ao De-Para do servidor?')) return;
+      if (!confirm('Descartar as edições não salvas e voltar ao De-Para do servidor?')) return;
+      if (S.api.on) { try { await loadFromApi(true); } catch (e) { return toast(e.message); } toast('Configurações recarregadas do banco.'); return; }
       ls.del('opa.depara'); await loadDepara(); rebuild(); toast('De-Para restaurado.');
     };
   }
@@ -523,6 +692,7 @@
   /* ---------- inicialização ---------- */
   function init() {
     C.initTip();
+    E.addSensitive(CFG.colunasSensiveis);
     $('#selPeriodo').onchange = e => {
       const v = e.target.value;
       if (v === 'auto') S.period = { mode: 'auto', start: '', end: '' };
@@ -540,7 +710,15 @@
     S.M = null;
     loadInitial().then(() => route());
     if (CFG.autoRefreshMinutes > 0) {
-      setInterval(async () => { if (S.source.kind === 'server' && !S.pending) { await reloadFromServer(true); } }, CFG.autoRefreshMinutes * 60000);
+      setInterval(async () => {
+        if (S.pending || S.dirty) return;
+        if (S.api.on && S.source.kind === 'api') {
+          try {
+            const st = await api.call('GET', '/status');
+            if (st.version !== S.source.version || st.configVersion !== S.cfgVersion) { await loadFromApi(true); toast('Dados atualizados.'); }
+          } catch (e) { /* tenta de novo no próximo ciclo */ }
+        } else if (S.source.kind === 'server') await reloadFromServer(true);
+      }, CFG.autoRefreshMinutes * 60000);
     }
   }
   document.addEventListener('DOMContentLoaded', init);

@@ -10,7 +10,7 @@ const { rows, error } = E.canonicalize(table); if (error) throw new Error(error)
 const dep = E.buildDepara(P.parseCSV(fs.readFileSync(path.join(root, 'data/depara_motivos.csv'), 'utf8')).slice(1).map(r => ({ key: r[0], padrao: r[1] })));
 const recs = E.prepare(rows); const unm = E.applyDepara(recs, dep);
 const per = E.resolvePeriod(recs, {});
-const M = E.compute(E.filterPeriod(recs, per), { maxDia: per.maxDia, minAvaliacoes: 10 });
+const M = E.compute(E.filterPeriod(recs, per), { maxDia: per.maxDia, minAvaliacoes: 10, tmaMaxMin: 0 });
 console.log('Período:', per.label, '| linhas:', rows.length, '| não mapeados:', unm.length);
 
 let fails = 0, checks = 0;
@@ -51,6 +51,8 @@ exp.ranking.filter(r => r[0] && !/Outros|INATIVO/.test(r[0]) && r[2] >= 10).forE
   const a = M.atendentes.find(x => x.nome.toLowerCase() === r[0].toLowerCase());
   eq('rank nota ' + r[0], a ? a.media : -1, r[3], 1e-6); eq('rank aval ' + r[0], a ? a.nAval : -1, r[2]);
 });
+const M24 = E.compute(E.filterPeriod(recs, per), { maxDia: per.maxDia, minAvaliacoes: 10, tmaMaxMin: 1440 });
+console.log('TMA ponderado sem teto:', M.kpi.tma, '| com teto de 24h:', M24.kpi.tma, '| excluídos:', M24.kpi.tmaExcluidos, '| mediana:', M24.kpi.tmaMediana.toFixed(1));
 console.log(`\n${checks - fails}/${checks} conferências batem com a planilha.`);
 console.log('Neutros (planilha mostrava 0 por problema de locale):', M.notas.grupos[1].qtd);
 console.log('KPIs:', JSON.stringify(M.kpi, null, 0).slice(0, 700));

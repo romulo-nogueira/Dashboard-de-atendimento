@@ -58,9 +58,13 @@
     const s = v == null ? '' : String(v);
     return /[",;\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
+  // Escreve as colunas conhecidas + as colunas extras (r.extras) encontradas nas linhas.
   function rowsToCSV(rows, fields, headers) {
-    const out = [fields.map(f => csvCell(headers[f])).join(',')];
-    for (const r of rows) out.push(fields.map(f => csvCell(r[f])).join(','));
+    const extra = [];
+    const seen = new Set();
+    for (const r of rows) if (r.extras) for (const k of Object.keys(r.extras)) if (!seen.has(k)) { seen.add(k); extra.push(k); }
+    const out = [fields.map(f => csvCell(headers[f])).concat(extra.map(csvCell)).join(',')];
+    for (const r of rows) out.push(fields.map(f => csvCell(r[f])).concat(extra.map(k => csvCell(r.extras ? r.extras[k] : ''))).join(','));
     return '\ufeff' + out.join('\r\n') + '\r\n';
   }
 

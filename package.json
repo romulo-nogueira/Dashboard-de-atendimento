@@ -1,0 +1,14 @@
+{
+  "name": "opa-dashboard",
+  "version": "2.0.0",
+  "description": "Dashboard de atendimentos com banco de dados (SQLite) e API",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/server.js",
+    "importar": "node --disable-warning=ExperimentalWarning server/importar.js",
+    "importar-clientes": "node --disable-warning=ExperimentalWarning server/importar-clientes.js",
+    "recriar": "node --disable-warning=ExperimentalWarning server/recriar.js",
+    "test": "node test/validate.js"
+  }
+}

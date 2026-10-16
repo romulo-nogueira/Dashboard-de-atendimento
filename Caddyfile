@@ -1,0 +1,4 @@
+# Troque pelo seu domínio. O Caddy obtém e renova o certificado HTTPS sozinho.
+dashboard.seudominio.com.br {
+  reverse_proxy dashboard:3000
+}
